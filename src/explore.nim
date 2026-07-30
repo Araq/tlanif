@@ -20,7 +20,7 @@ proc permsOf(xs: seq[SymId]): seq[seq[SymId]] =
     for p in permsOf(rest):
       result.add @[xs[i]] & p
 
-proc buildPerms(groups: seq[seq[SymId]]): seq[Table[SymId, SymId]] =
+proc buildPerms*(groups: seq[seq[SymId]]): seq[Table[SymId, SymId]] =
   ## Product of per-sort object permutations, each as a SymId→SymId rewrite.
   result = @[initTable[SymId, SymId]()]
   for g in groups:
@@ -34,7 +34,7 @@ proc buildPerms(groups: seq[seq[SymId]]): seq[Table[SymId, SymId]] =
         nextPerms.add tbl
     result = nextPerms
 
-proc canonicalState(m: Module; st: State; perms: seq[Table[SymId, SymId]]): State =
+proc canonicalState*(m: Module; st: State; perms: seq[Table[SymId, SymId]]): State =
   ## The lexicographically smallest state in `st`'s symmetry orbit — its
   ## canonical representative. Object symbols are interchangeable, so all orbit
   ## members satisfy the (symmetric) invariant iff the representative does.

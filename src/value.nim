@@ -468,6 +468,107 @@ proc permuteValue*(vs: Values; v: Value; perm: Table[SymId, SymId]): Value =
       t.buildTree VTRecord:
         for (k, val) in fs: t.addKv k, val
 
+# ── Canonical binary encoding ────────────────────────────────────────────
+#
+# Serializes a value to bytes for cross-thread transfer and hashing. The
+# encoding is canonical: sets, function pairs and record fields are kept
+# sorted by construction everywhere, and SymIds are deterministic for a
+# given spec file, so structurally equal values (even from different
+# workers' pools) encode to identical bytes.
+
+proc addU32(dest: var string; x: uint32) {.inline.} =
+  dest.add char(x and 0xff)
+  dest.add char((x shr 8) and 0xff)
+  dest.add char((x shr 16) and 0xff)
+  dest.add char((x shr 24) and 0xff)
+
+proc readU32(src: string; pos: var int): uint32 {.inline.} =
+  result = uint32(src[pos]) or (uint32(src[pos+1]) shl 8) or
+           (uint32(src[pos+2]) shl 16) or (uint32(src[pos+3]) shl 24)
+  inc pos, 4
+
+proc encodeValue*(v: Value; dest: var string) =
+  case kind(v)
+  of vkNull:
+    dest.add '\0'
+  of vkBool:
+    dest.add (if getBool(v): '\2' else: '\1')
+  of vkInt:
+    dest.add '\3'
+    let x = cast[uint64](getInt(v))
+    for i in 0 ..< 8:
+      dest.add char((x shr (8 * i)) and 0xff)
+  of vkModel:
+    dest.add '\4'
+    dest.addU32 uint32(getModel(v))
+  of vkSet, vkSeq:
+    dest.add (if kind(v) == vkSet: '\5' else: '\6')
+    dest.addU32 uint32(len(v))
+    for e in items(v):
+      encodeValue(e, dest)
+  of vkFun:
+    dest.add '\7'
+    dest.addU32 uint32(len(v))
+    for (k, x) in pairs(v):
+      encodeValue(k, dest)
+      encodeValue(x, dest)
+  of vkRecord:
+    dest.add '\x08'
+    dest.addU32 uint32(len(v))
+    for (s, x) in fields(v):
+      dest.addU32 uint32(s)
+      encodeValue(x, dest)
+
+proc decodeValue*(vs: Values; src: string; pos: var int): Value =
+  let tag = src[pos]
+  inc pos
+  case tag
+  of '\0':
+    result = buildValue(vs):
+      t.addNull
+  of '\1', '\2':
+    result = buildValue(vs):
+      t.addBool tag == '\2'
+  of '\3':
+    var x = 0'u64
+    for i in 0 ..< 8:
+      x = x or (uint64(src[pos + i]) shl (8 * i))
+    inc pos, 8
+    result = buildValue(vs):
+      t.addInt cast[int64](x)
+  of '\4':
+    let s = SymId(readU32(src, pos))
+    result = buildValue(vs):
+      t.addModel s
+  of '\5', '\6':
+    let n = int(readU32(src, pos))
+    var xs = newSeq[Value](n)
+    for i in 0 ..< n:
+      xs[i] = decodeValue(vs, src, pos)
+    result = buildValue(vs):
+      t.buildTree (if tag == '\5': VTSet else: VTSeq):
+        for e in xs: t.addValue e
+  of '\7':
+    let n = int(readU32(src, pos))
+    var ps = newSeq[(Value, Value)](n)
+    for i in 0 ..< n:
+      ps[i][0] = decodeValue(vs, src, pos)
+      ps[i][1] = decodeValue(vs, src, pos)
+    result = buildValue(vs):
+      t.buildTree VTFun:
+        for (k, x) in ps: t.addMapsto k, x
+  of '\x08':
+    let n = int(readU32(src, pos))
+    var fs = newSeq[(SymId, Value)](n)
+    for i in 0 ..< n:
+      fs[i][0] = SymId(readU32(src, pos))
+      fs[i][1] = decodeValue(vs, src, pos)
+    result = buildValue(vs):
+      t.buildTree VTRecord:
+        for (s, x) in fs: t.addKv s, x
+  else:
+    raiseAssert "corrupt value encoding, tag byte " & $ord(tag)
+
 proc toString*(v: Value; dest: var string) =
   ## Append a readable form of `v` to `dest`. Prefer this over `$` when
   ## building larger output to avoid intermediate string allocations.
