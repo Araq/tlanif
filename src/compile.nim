@@ -64,7 +64,7 @@ type
 const
   IntCacheMax = 256
   InternCap = 1_000_000      ## per-variable intern entries before epoch flush
-  DefCacheCap = 500_000      ## per-site def-cache entries before flush
+  DefCacheCap = 200_000      ## per-site def-cache entries before flush
   CK = 4                     ## def-cache key arity (frees beyond this: no cache)
 
 proc mkBool(cm: CompiledModule; b: bool): Value {.inline.} =
@@ -137,8 +137,17 @@ proc compileSymRef(cm: CompiledModule; s: SymId; sc: Scope): CExpr =
         # differs only in other variables — this is where the interpreter
         # memo got its win, minus the built-and-hashed key Values.
         var cache = initTable[string, Value]()
+        var looks = 0
+        var hits = 0
+        var disabled = false
         let cs = comps
         return proc(): Value =
+          # Adaptive: a site whose keys turn out nearly unique (an
+          # invariant conjunct free over most variables sees one key per
+          # state) pays insert churn and unbounded growth for nothing —
+          # after the sampling window it disables itself and recomputes,
+          # which post-guardBool-fix is cheap (short-circuited body).
+          if disabled: return bodyE()
           var key = newStringOfCap(cs.len * 12)
           for i in 0 ..< cs.len:
             if cs[i] < 0:
@@ -160,7 +169,17 @@ proc compileSymRef(cm: CompiledModule; s: SymId; sc: Scope): CExpr =
               key.add char((k shr 16) and 0xff)
               key.add char((k shr 24) and 0xff)
           cache.withValue(key, hit):
+            inc hits
+            inc looks
             return hit[]
+          inc looks
+          if looks >= 8192:
+            if hits * 4 < looks:
+              disabled = true
+              cache = initTable[string, Value]()
+              return bodyE()
+            looks = 0
+            hits = 0
           if cache.len >= DefCacheCap:
             cache.clear()
           let v = bodyE()
