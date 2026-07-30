@@ -1,0 +1,33 @@
+(stmts
+  (constants :Threads.0.)
+  (variables :lock.0. :owner.0.)
+  (models Threads.0. :t1.0. :t2.0.)
+
+  (def :Init.0.
+    (and
+      (prime lock.0. (false))
+      (prime owner.0. (null))))
+
+  (def :Acquire.0.
+    (exists :t.0 Threads.0.
+      (and
+        (eq lock.0. (false))
+        (prime lock.0. (true))
+        (prime owner.0. t.0))))
+
+  (def :Release.0.
+    (and
+      (eq lock.0. (true))
+      (prime lock.0. (false))
+      (unchanged owner.0.)))
+
+  (def :Next.0.
+    (or Acquire.0. Release.0.))
+
+  (def :Inv.0.
+    (eq lock.0. (neq owner.0. (null))))
+
+  (spec (always-stutter Init.0. Next.0.
+    (tuple lock.0. owner.0.)))
+  (check Inv.0.)
+)

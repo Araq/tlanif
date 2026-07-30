@@ -1,0 +1,537 @@
+(stmts#YRC proof NIF port of yrc_proof.tla small finite model#
+  # YRC proof — NIF port of nim/lib/system/yrc_proof.tla (simplified finite model).
+  # MarkGray/Scan use bounded ReachableFrom (4 steps) instead of \E path \in Seq(S).
+  # mergedRoots is a set of objects (not a seq of records). Stripe count = 1.
+
+  (constants
+    :NumStripes.0. :QueueSize.0. :RootsThreshold.0.
+    :Objects.0. :Threads.0. :SeqPayloads.0. :Stripes.0.)
+  (assign NumStripes.0. 1)
+  (assign QueueSize.0. 1)
+  (assign RootsThreshold.0. 1)
+  (models Objects.0. :o1.0. :o2.0.)
+  (models Threads.0. :t1.0. :t2.0.)
+  (models SeqPayloads.0. :p1.0. :p2.0.)
+  (assign Stripes.0. (range 0 0))
+
+  (variables
+    :edges.0. :roots.0. :rc.0. :color.0. :inRoots.0.
+    :toIncLen.0. :toInc.0. :toDecLen.0. :toDec.0.
+    :globalLock.0. :mergedRoots.0. :collecting.0.
+    :seqData.0. :payloadAlive.0. :rwLockReaders.0. :collectorPayload.0.)
+
+  (def :colBlack.0. 0)
+  (def :colGray.0. 1)
+  (def :colWhite.0. 2)
+
+  # ── helpers (free vars bound by let at call site) ──────────────────────
+
+  (def :InternalRC.0.
+    (card (setcomp :src.0 Objects.0.
+      (apply (apply edges.0. src.0.) obj.0.))))
+
+  (def :ExternalRC.0.
+    (card (setcomp :th.0 Threads.0.
+      (apply (apply roots.0. th.0.) obj.0.))))
+
+  (def :LogicalRC.0.
+    (plus InternalRC.0. ExternalRC.0.))
+
+  (def :ReachableStep.0.
+    (union current.0.
+      (setcomp :y.0 Objects.0.
+        (exists :x.0 current.0.
+          (apply (apply edges.0. x.0.) y.0.)))))
+
+  (def :ReachableFrom.0.
+    (let (bind :current.0. (set start.0.))
+      (let (bind :current.0. ReachableStep.0.)
+        (let (bind :current.0. ReachableStep.0.)
+          (let (bind :current.0. ReachableStep.0.)
+            ReachableStep.0.)))))
+
+  (def :ReachableSet.0.
+    (let (bind :current.0.
+        (setcomp :x.0 Objects.0.
+          (exists :th.0 Threads.0.
+            (apply (apply roots.0. th.0.) x.0.))))
+      (let (bind :current.0. ReachableStep.0.)
+        (let (bind :current.0. ReachableStep.0.)
+          (let (bind :current.0. ReachableStep.0.)
+            ReachableStep.0.)))))
+
+  (def :AllUnchanged.0.
+    (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+      toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+      globalLock.0. mergedRoots.0. collecting.0.
+      seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))
+
+  # ── Init ───────────────────────────────────────────────────────────────
+
+  (def :Init.0.
+    (and
+      (prime edges.0.
+        (funof :x.0 Objects.0.
+          (funof :y.0 Objects.0. (false))))
+      (prime roots.0.
+        (funof :th.0 Threads.0.
+          (funof :x.0 Objects.0. (false))))
+      (prime rc.0. (funof :x.0 Objects.0. 0))
+      (prime color.0. (funof :x.0 Objects.0. colBlack.0.))
+      (prime inRoots.0. (funof :x.0 Objects.0. (false)))
+      (prime toIncLen.0. (funof :s.0 Stripes.0. 0))
+      (prime toInc.0. (funof :s.0 Stripes.0. (emptyseq)))
+      (prime toDecLen.0. (funof :s.0 Stripes.0. 0))
+      (prime toDec.0. (funof :s.0 Stripes.0. (emptyseq)))
+      (prime globalLock.0. (null))
+      (prime mergedRoots.0. (emptyset))
+      (prime collecting.0. (false))
+      (prime seqData.0. (funof :x.0 Objects.0. (null)))
+      (prime payloadAlive.0. (funof :p.0 SeqPayloads.0. (false)))
+      (prime rwLockReaders.0. (emptyset))
+      (prime collectorPayload.0. (null))))
+
+  # ── Mutator write (atomic store + buffer in one action) ────────────────
+
+  (def :MutatorWrite.0.
+    (exists :th.0 Threads.0.
+      (exists :dest.0 Objects.0.
+        (exists :old.0 (union Objects.0. (set (null)))
+          (exists :new.0 (union Objects.0. (set (null)))
+            (and
+              (or (eq old.0. (null))
+                  (apply (apply edges.0. dest.0.) old.0.))
+              (prime edges.0.
+                (except edges.0.
+                  (mapsto dest.0.
+                    (funof :x.0 Objects.0.
+                      (and (eq x.0. new.0.) (neq new.0. (null)))))))
+              (let (bind :stripe.0. 0)
+                (let (bind :incOvf.0.
+                    (and (neq new.0. (null))
+                         (ge (apply toIncLen.0. stripe.0.) QueueSize.0.)))
+                  (let (bind :decOvf.0.
+                      (and (neq old.0. (null))
+                           (ge (apply toDecLen.0. stripe.0.) QueueSize.0.)))
+                    (if (or incOvf.0. decOvf.0.)
+                      (unchanged toIncLen.0. toInc.0. toDecLen.0. toDec.0.)
+                      (and
+                        (if (neq new.0. (null))
+                          (and
+                            (prime toIncLen.0.
+                              (except toIncLen.0.
+                                (mapsto stripe.0.
+                                  (plus (apply toIncLen.0. stripe.0.) 1))))
+                            (prime toInc.0.
+                              (except toInc.0.
+                                (mapsto stripe.0.
+                                  (append (apply toInc.0. stripe.0.) new.0.)))))
+                          (unchanged toIncLen.0. toInc.0.))
+                        (if (neq old.0. (null))
+                          (and
+                            (prime toDecLen.0.
+                              (except toDecLen.0.
+                                (mapsto stripe.0.
+                                  (plus (apply toDecLen.0. stripe.0.) 1))))
+                            (prime toDec.0.
+                              (except toDec.0.
+                                (mapsto stripe.0.
+                                  (append (apply toDec.0. stripe.0.) old.0.)))))
+                          (unchanged toDecLen.0. toDec.0.)))))))
+              (unchanged roots.0. rc.0. color.0. inRoots.0.
+                globalLock.0. mergedRoots.0. collecting.0.
+                seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))))))
+
+  (def :MutatorWriteMergeInc.0.
+    (exists :th.0 Threads.0.
+      (and
+        (exists :s.0 Stripes.0. (ge (apply toIncLen.0. s.0.) QueueSize.0.))
+        (eq globalLock.0. (null))
+        (prime toIncLen.0. (funof :s.0 Stripes.0. 0))
+        (prime toInc.0. (funof :s.0 Stripes.0. (emptyseq)))
+        (prime rc.0.
+          (funof :x.0 Objects.0.
+            (let (bind :obj.0. x.0.) LogicalRC.0.)))
+        (unchanged edges.0. roots.0. color.0. inRoots.0.
+          toDecLen.0. toDec.0. globalLock.0. mergedRoots.0. collecting.0.
+          seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))
+
+  (def :MutatorWriteMergeDec.0.
+    (exists :th.0 Threads.0.
+      (and
+        (exists :s.0 Stripes.0. (ge (apply toDecLen.0. s.0.) QueueSize.0.))
+        (eq globalLock.0. (null))
+        (prime rc.0.
+          (funof :x.0 Objects.0.
+            (let (bind :obj.0. x.0.) LogicalRC.0.)))
+        (prime mergedRoots.0.
+          (union mergedRoots.0.
+            (setcomp :x.0 Objects.0.
+              (exists :s.0 Stripes.0.
+                (exists :i.0 (range 1 (len (apply toDec.0. s.0.)))
+                  (eq (apply (apply toDec.0. s.0.) i.0.) x.0.))))))
+        (prime inRoots.0.
+          (funof :x.0 Objects.0.
+            (or (apply inRoots.0. x.0.)
+                (in x.0.
+                  (setcomp :y.0 Objects.0.
+                    (exists :s.0 Stripes.0.
+                      (exists :i.0 (range 1 (len (apply toDec.0. s.0.)))
+                        (eq (apply (apply toDec.0. s.0.) i.0.) y.0.))))))))
+        (prime toIncLen.0. (funof :s.0 Stripes.0. 0))
+        (prime toInc.0. (funof :s.0 Stripes.0. (emptyseq)))
+        (prime toDecLen.0. (funof :s.0 Stripes.0. 0))
+        (prime toDec.0. (funof :s.0 Stripes.0. (emptyseq)))
+        (unchanged edges.0. roots.0. color.0. globalLock.0. collecting.0.
+          seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))
+
+  (def :MutatorRootAssign.0.
+    (exists :th.0 Threads.0.
+      (exists :obj.0 (union Objects.0. (set (null)))
+        (exists :val.0 (union Objects.0. (set (null)))
+          (and
+            (if (neq val.0. (null))
+              (and
+                (prime roots.0.
+                  (except roots.0.
+                    (mapsto th.0.
+                      (except (apply roots.0. th.0.)
+                        (mapsto val.0. (true))))))
+                (prime rc.0.
+                  (except rc.0.
+                    (mapsto val.0.
+                      (if (apply (apply roots.0. th.0.) val.0.)
+                        (at)
+                        (plus (at) 1))))))
+              (and
+                (neq obj.0. (null))
+                (prime roots.0.
+                  (except roots.0.
+                    (mapsto th.0.
+                      (except (apply roots.0. th.0.)
+                        (mapsto obj.0. (false))))))
+                (prime rc.0.
+                  (except rc.0.
+                    (mapsto obj.0.
+                      (if (apply (apply roots.0. th.0.) obj.0.)
+                        (minus (at) 1)
+                        (at)))))))
+            (unchanged edges.0. color.0. inRoots.0.
+              toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+              globalLock.0. mergedRoots.0. collecting.0.
+              seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))))
+
+  # ── Collector / RWLock ─────────────────────────────────────────────────
+
+  (def :CollectorAcquireLock.0.
+    (exists :th.0 Threads.0.
+      (and
+        (eq globalLock.0. (null))
+        (eq rwLockReaders.0. (emptyset))
+        (prime globalLock.0. th.0.)
+        (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+          toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+          mergedRoots.0. collecting.0.
+          seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))
+
+  (def :CollectorReleaseLock.0.
+    (exists :th.0 Threads.0.
+      (and
+        (eq globalLock.0. th.0.)
+        (prime globalLock.0. (null))
+        (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+          toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+          mergedRoots.0. collecting.0.
+          seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))
+
+  (def :MergePendingRoots.0.
+    (and
+      (neq globalLock.0. (null))
+      (prime rc.0.
+        (funof :x.0 Objects.0.
+          (let (bind :obj.0. x.0.) LogicalRC.0.)))
+      (prime mergedRoots.0.
+        (union mergedRoots.0.
+          (setcomp :x.0 Objects.0.
+            (and (eq (apply inRoots.0. x.0.) (false))
+                 (exists :s.0 Stripes.0.
+                   (exists :i.0 (range 1 (len (apply toDec.0. s.0.)))
+                     (eq (apply (apply toDec.0. s.0.) i.0.) x.0.)))))))
+      (prime inRoots.0.
+        (funof :x.0 Objects.0.
+          (or (apply inRoots.0. x.0.) (in x.0. mergedRoots.0.))))
+      (prime toIncLen.0. (funof :s.0 Stripes.0. 0))
+      (prime toInc.0. (funof :s.0 Stripes.0. (emptyseq)))
+      (prime toDecLen.0. (funof :s.0 Stripes.0. 0))
+      (prime toDec.0. (funof :s.0 Stripes.0. (emptyseq)))
+      (unchanged edges.0. roots.0. color.0. globalLock.0. collecting.0.
+        seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.
+        mergedRoots.0.)))
+
+  # Note: MergePendingRoots above primes mergedRoots twice conflicting —
+  # fix: compute newRoots then set both. Redefine cleanly below via Start only.
+
+  (def :CollectorMerge.0.
+    (and
+      (neq globalLock.0. (null))
+      (let (bind :newRoots.0.
+          (setcomp :x.0 Objects.0.
+            (and (eq (apply inRoots.0. x.0.) (false))
+                 (exists :s.0 Stripes.0.
+                   (exists :i.0 (range 1 (len (apply toDec.0. s.0.)))
+                     (eq (apply (apply toDec.0. s.0.) i.0.) x.0.))))))
+        (and
+          (prime rc.0.
+            (funof :x.0 Objects.0.
+              (let (bind :obj.0. x.0.) LogicalRC.0.)))
+          (prime mergedRoots.0. (union mergedRoots.0. newRoots.0.))
+          (prime inRoots.0.
+            (funof :x.0 Objects.0.
+              (or (apply inRoots.0. x.0.) (in x.0. newRoots.0.))))
+          (prime toIncLen.0. (funof :s.0 Stripes.0. 0))
+          (prime toInc.0. (funof :s.0 Stripes.0. (emptyseq)))
+          (prime toDecLen.0. (funof :s.0 Stripes.0. 0))
+          (prime toDec.0. (funof :s.0 Stripes.0. (emptyseq)))
+          (unchanged edges.0. roots.0. color.0. globalLock.0. collecting.0.
+            seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))))
+
+  (def :StartCollection.0.
+    (and
+      (neq globalLock.0. (null))
+      (eq collecting.0. (false))
+      (ge (card mergedRoots.0.) RootsThreshold.0.)
+      (prime collecting.0. (true))
+      (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+        toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+        globalLock.0. mergedRoots.0.
+        seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))
+
+  (def :EndCollection.0.
+    (and
+      (neq globalLock.0. (null))
+      (eq collecting.0. (true))
+      (prime inRoots.0.
+        (funof :x.0 Objects.0.
+          (if (in x.0. mergedRoots.0.) (false) (apply inRoots.0. x.0.))))
+      (prime mergedRoots.0. (emptyset))
+      (prime collecting.0. (false))
+      (unchanged edges.0. roots.0. rc.0. color.0.
+        toIncLen.0. toInc.0. toDecLen.0. toDec.0. globalLock.0.
+        seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))
+
+  # Simplified MarkGray: mark obj gray; decrement RC of direct children only
+  # (full transitive version uses ReachableFrom — kept lighter for state space)
+
+  (def :CollectorMarkGray.0.
+    (and
+      (neq globalLock.0. (null))
+      (eq collecting.0. (true))
+      (exists :obj.0 mergedRoots.0.
+        (and
+          (neq (apply color.0. obj.0.) colGray.0.)
+          (let (bind :start.0. obj.0.)
+            (let (bind :reach.0. ReachableFrom.0.)
+              (and
+                (prime color.0.
+                  (funof :x.0 Objects.0.
+                    (if (or (eq x.0. obj.0.) (in x.0. reach.0.))
+                      colGray.0.
+                      (apply color.0. x.0.))))
+                (prime rc.0.
+                  (funof :x.0 Objects.0.
+                    (if (in x.0. reach.0.)
+                      (minus (apply rc.0. x.0.)
+                        (card (setcomp :y.0 (union (set obj.0.) reach.0.)
+                          (apply (apply edges.0. y.0.) x.0.))))
+                      (apply rc.0. x.0.))))
+                (unchanged edges.0. roots.0. inRoots.0.
+                  toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+                  globalLock.0. mergedRoots.0. collecting.0.
+                  seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))))))
+
+  (def :CollectorScan.0.
+    (and
+      (neq globalLock.0. (null))
+      (eq collecting.0. (true))
+      (exists :obj.0 mergedRoots.0.
+        (and
+          (eq (apply color.0. obj.0.) colGray.0.)
+          (if (ge (apply rc.0. obj.0.) 0)
+            (let (bind :start.0. obj.0.)
+              (let (bind :reach.0. ReachableFrom.0.)
+                (and
+                  (prime rc.0.
+                    (funof :x.0 Objects.0.
+                      (if (in x.0. reach.0.)
+                        (plus (apply rc.0. x.0.)
+                          (card (setcomp :y.0 (union (set obj.0.) reach.0.)
+                            (apply (apply edges.0. y.0.) x.0.))))
+                        (apply rc.0. x.0.))))
+                  (prime color.0.
+                    (funof :x.0 Objects.0.
+                      (if (or (eq x.0. obj.0.) (in x.0. reach.0.))
+                        colBlack.0.
+                        (apply color.0. x.0.))))
+                  (unchanged edges.0. roots.0. inRoots.0.
+                    toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+                    globalLock.0. mergedRoots.0. collecting.0.
+                    seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.))))
+            (and
+              (prime color.0.
+                (except color.0. (mapsto obj.0. colWhite.0.)))
+              (unchanged edges.0. roots.0. rc.0. inRoots.0.
+                toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+                globalLock.0. mergedRoots.0. collecting.0.
+                seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))))))
+
+  (def :CollectorCollect.0.
+    (and
+      (neq globalLock.0. (null))
+      (eq collecting.0. (true))
+      (exists :obj.0 Objects.0.
+        (and
+          (or (eq (apply color.0. obj.0.) colWhite.0.)
+              (eq (apply color.0. obj.0.) colGray.0.))
+          (eq (apply inRoots.0. obj.0.) (false))
+          (prime edges.0.
+            (except edges.0.
+              (mapsto obj.0.
+                (funof :x.0 Objects.0. (false)))))
+          (prime color.0.
+            (except color.0. (mapsto obj.0. colBlack.0.)))
+          (unchanged roots.0. rc.0. inRoots.0.
+            toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+            globalLock.0. mergedRoots.0. collecting.0.
+            seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))))
+
+  # ── Seq payload / RWLock ───────────────────────────────────────────────
+
+  (def :MutatorAcquireSeqLock.0.
+    (exists :th.0 Threads.0.
+      (and
+        (eq globalLock.0. (null))
+        (notin th.0. rwLockReaders.0.)
+        (prime rwLockReaders.0. (union rwLockReaders.0. (set th.0.)))
+        (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+          toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+          globalLock.0. mergedRoots.0. collecting.0.
+          seqData.0. payloadAlive.0. collectorPayload.0.))))
+
+  (def :MutatorReleaseSeqLock.0.
+    (exists :th.0 Threads.0.
+      (and
+        (in th.0. rwLockReaders.0.)
+        (prime rwLockReaders.0. (setminus rwLockReaders.0. (set th.0.)))
+        (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+          toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+          globalLock.0. mergedRoots.0. collecting.0.
+          seqData.0. payloadAlive.0. collectorPayload.0.))))
+
+  (def :MutatorSeqAssign.0.
+    (exists :th.0 Threads.0.
+      (exists :obj.0 Objects.0.
+        (exists :newP.0 SeqPayloads.0.
+          (and
+            (in th.0. rwLockReaders.0.)
+            (neq (apply seqData.0. obj.0.) (null))
+            (eq (apply payloadAlive.0. newP.0.) (false))
+            (let (bind :oldP.0. (apply seqData.0. obj.0.))
+              (and
+                (prime seqData.0.
+                  (except seqData.0. (mapsto obj.0. newP.0.)))
+                (prime payloadAlive.0.
+                  (except payloadAlive.0.
+                    (mapsto oldP.0. (false))
+                    (mapsto newP.0. (true))))
+                (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+                  toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+                  globalLock.0. mergedRoots.0. collecting.0.
+                  rwLockReaders.0. collectorPayload.0.))))))))
+
+  (def :CollectorStartTraceSeq.0.
+    (exists :obj.0 Objects.0.
+      (and
+        (neq globalLock.0. (null))
+        (eq collecting.0. (true))
+        (neq (apply seqData.0. obj.0.) (null))
+        (eq collectorPayload.0. (null))
+        (prime collectorPayload.0. (apply seqData.0. obj.0.))
+        (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+          toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+          globalLock.0. mergedRoots.0. collecting.0.
+          seqData.0. payloadAlive.0. rwLockReaders.0.))))
+
+  (def :CollectorFinishTraceSeq.0.
+    (and
+      (neq globalLock.0. (null))
+      (eq collecting.0. (true))
+      (neq collectorPayload.0. (null))
+      (prime collectorPayload.0. (null))
+      (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+        toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+        globalLock.0. mergedRoots.0. collecting.0.
+        seqData.0. payloadAlive.0. rwLockReaders.0.)))
+
+  # Seed one seq payload so MutatorSeqAssign / trace can fire
+  (def :SeedSeq.0.
+    (exists :obj.0 Objects.0.
+      (exists :p.0 SeqPayloads.0.
+        (and
+          (eq (apply seqData.0. obj.0.) (null))
+          (eq (apply payloadAlive.0. p.0.) (false))
+          (prime seqData.0. (except seqData.0. (mapsto obj.0. p.0.)))
+          (prime payloadAlive.0. (except payloadAlive.0. (mapsto p.0. (true))))
+          (unchanged edges.0. roots.0. rc.0. color.0. inRoots.0.
+            toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+            globalLock.0. mergedRoots.0. collecting.0.
+            rwLockReaders.0. collectorPayload.0.)))))
+
+  (def :Next.0.
+    (or
+      MutatorWrite.0.
+      MutatorWriteMergeInc.0.
+      MutatorWriteMergeDec.0.
+      MutatorRootAssign.0.
+      CollectorAcquireLock.0.
+      CollectorMerge.0.
+      StartCollection.0.
+      CollectorMarkGray.0.
+      CollectorScan.0.
+      CollectorCollect.0.
+      EndCollection.0.
+      CollectorReleaseLock.0.
+      MutatorAcquireSeqLock.0.
+      MutatorReleaseSeqLock.0.
+      MutatorSeqAssign.0.
+      CollectorStartTraceSeq.0.
+      CollectorFinishTraceSeq.0.
+      SeedSeq.0.))
+
+  # ── Invariants ─────────────────────────────────────────────────────────
+
+  (def :SeqPayloadSafety.0.
+    (implies (neq collectorPayload.0. (null))
+      (apply payloadAlive.0. collectorPayload.0.)))
+
+  (def :RWLockInvariant.0.
+    (implies (neq globalLock.0. (null))
+      (eq rwLockReaders.0. (emptyset))))
+
+  (def :CycleInvariant.0.
+    (forall :obj.0 Objects.0.
+      (implies
+        (and (eq (apply color.0. obj.0.) colWhite.0.)
+             (eq (apply inRoots.0. obj.0.) (false)))
+        (let (bind :obj.0. obj.0.)
+          (eq ExternalRC.0. 0)))))
+
+  (def :Inv.0.
+    (and SeqPayloadSafety.0. RWLockInvariant.0. CycleInvariant.0.))
+
+  (spec (always-stutter Init.0. Next.0.
+    (tuple edges.0. roots.0. rc.0. color.0. inRoots.0.
+      toIncLen.0. toInc.0. toDecLen.0. toDec.0.
+      globalLock.0. mergedRoots.0. collecting.0.
+      seqData.0. payloadAlive.0. rwLockReaders.0. collectorPayload.0.)))
+  (check Inv.0.)
+)
