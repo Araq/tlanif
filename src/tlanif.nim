@@ -9,7 +9,9 @@ tlanif — NIF-syntax TLA safety model checker
 Usage:
   tlanif <spec.nif>
   tlanif --max-states:N <spec.nif>
-  tlanif --jobs:N <spec.nif>       # parallel BFS with N workers (0 = auto)
+  tlanif --jobs:N <spec.nif>        # parallel BFS with N workers (0 = auto);
+                                    # also uses interned state storage
+  tlanif --memo-limit:N <spec.nif>  # def-memo entry cap per module (0 = off)
 
 See examples/.
 """
@@ -17,7 +19,8 @@ See examples/.
 proc main() =
   var maxStates = 100_000
   var symmetry = false
-  var jobs = 1
+  var jobs = 0          # 0 = --jobs not given: sequential reference explorer
+  var memoLimit = -1    # -1 = keep the loader default
   var file = ""
   for i in 1 .. paramCount():
     let a = paramStr(i)
@@ -26,6 +29,8 @@ proc main() =
     elif a.startsWith("--jobs:"):
       jobs = parseInt(a["--jobs:".len .. ^1])
       if jobs <= 0: jobs = countProcessors()
+    elif a.startsWith("--memo-limit:"):
+      memoLimit = parseInt(a["--memo-limit:".len .. ^1])
     elif a == "--sym":
       symmetry = true
     elif a in ["-h", "--help"]:
@@ -45,13 +50,14 @@ proc main() =
     quit(1)
 
   try:
-    let m = loadModuleFile(file)
-    let r =
-      if jobs > 1:
-        pexplore.pexplore(file, maxStates, symmetry, jobs)
-      else:
-        explore(m, maxStates, symmetry)
-    if jobs <= 1:
+    var r: CheckResult
+    if jobs >= 1:
+      r = pexplore.pexplore(file, maxStates, symmetry, jobs, memoLimit)
+    else:
+      let m = loadModuleFile(file)
+      if memoLimit >= 0:
+        m.memoLimit = memoLimit
+      r = explore(m, maxStates, symmetry)
       let total = m.memoHits + m.memoMisses
       if total > 0:
         stderr.writeLine "memo: " & $m.memoHits & " hits / " & $total &
@@ -61,7 +67,7 @@ proc main() =
       echo r.message
       quit(0)
     else:
-      stderr.writeLine formatCounterexample(m, r)
+      stderr.writeLine formatCounterexample(r)
       quit(2)
   except EvalError as e:
     stderr.writeLine "error: " & e.msg

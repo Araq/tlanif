@@ -35,10 +35,20 @@ type
     pending: int
     quitting: bool
     symmetry: bool
+    memoLimit: int         ## -1 = keep the loader default
     path: string
     chunks: seq[Chunk]
 
   WorkerArg = tuple[pool: ptr WorkerPool, idx: int]
+
+  Interner = object
+    ## Per-variable value interning (main thread only). The number of
+    ## distinct values one variable takes is tiny compared to the number of
+    ## states (states are the cross product, variables are its factors), so
+    ## visited/order shrink from one byte string per state to one packed
+    ## 4-byte index per variable — exact, no fingerprinting.
+    idx: Table[string, int32]   ## encoded value bytes → dense index
+    encs: seq[string]           ## dense index → encoded value bytes
 
 proc encodeState*(m: Module; st: State): string =
   result = ""
@@ -50,6 +60,37 @@ proc decodeState*(m: Module; s: string): State =
   var pos = 0
   for v in m.variables:
     result.vals[v] = decodeValue(m.vs, s, pos)
+
+proc internState(ins: var seq[Interner]; enc: string): string =
+  ## Split an encoded state into per-variable segments, intern each and
+  ## return the packed index tuple (4 bytes LE per variable).
+  result = newStringOfCap(4 * ins.len)
+  var pos = 0
+  for i in 0 ..< ins.len:
+    let start = pos
+    skipEncodedValue(enc, pos)
+    let seg = enc[start .. pos - 1]
+    var id: int32
+    ins[i].idx.withValue(seg, hit):
+      id = hit[]
+    do:
+      id = int32(ins[i].encs.len)
+      ins[i].encs.add seg
+      ins[i].idx[seg] = id
+    let u = uint32(id)
+    result.add char(u and 0xff)
+    result.add char((u shr 8) and 0xff)
+    result.add char((u shr 16) and 0xff)
+    result.add char((u shr 24) and 0xff)
+
+proc unpackState(ins: seq[Interner]; key: string): string =
+  ## Packed index tuple → concatenated encoded state bytes.
+  result = ""
+  for i in 0 ..< ins.len:
+    let p = 4 * i
+    let id = uint32(key[p]) or (uint32(key[p+1]) shl 8) or
+             (uint32(key[p+2]) shl 16) or (uint32(key[p+3]) shl 24)
+    result.add ins[i].encs[int id]
 
 proc expandChunk(m: Module; perms: seq[Table[SymId, SymId]]; useSym: bool;
                  chunk: ptr Chunk) =
@@ -86,6 +127,8 @@ proc workerLoop(arg: WorkerArg) {.thread.} =
       if m == nil and p.chunks[arg.idx].err.len == 0:
         try:
           m = loadModuleFile(p.path)
+          if p.memoLimit >= 0:
+            m.memoLimit = p.memoLimit
           if p.symmetry:
             perms = buildPerms(m.modelGroups)
           useSym = p.symmetry and perms.len > 1
@@ -112,16 +155,21 @@ proc runLevel(p: ptr WorkerPool) =
   release p.lock
 
 proc pexplore*(path: string; maxStates = 100_000; symmetry = false;
-               jobs = 2): CheckResult =
+               jobs = 2; memoLimit = -1): CheckResult =
   result = CheckResult(ok: true, statesExplored: 0, counterexample: @[],
                        message: "")
   let m0 = loadModuleFile(path)
+  if memoLimit >= 0:
+    m0.memoLimit = memoLimit
   let perms0 = if symmetry: buildPerms(m0.modelGroups)
                else: @[]
   let useSym = symmetry and perms0.len > 1
   if useSym:
     stderr.writeLine "symmetry reduction: " & $perms0.len & " permutations"
 
+  # visited/order are keyed by packed per-variable intern indices, not by
+  # the encoded state bytes; workers still speak encoded bytes.
+  var interners = newSeq[Interner](m0.variables.len)
   var visited = initTable[string, int32]()
   var order: seq[string] = @[]
   var parent: seq[int32] = @[]
@@ -134,15 +182,15 @@ proc pexplore*(path: string; maxStates = 100_000; symmetry = false;
     return
   for st0 in inits:
     let st = if useSym: canonicalState(m0, st0, perms0) else: st0
-    let enc = encodeState(m0, st)
-    if enc in visited: continue
-    visited[enc] = int32(order.len)
+    let key = internState(interners, encodeState(m0, st))
+    if key in visited: continue
+    visited[key] = int32(order.len)
     parent.add -1'i32
     frontier.add int32(order.len)
-    order.add enc
+    order.add key
 
   var pool = WorkerPool(generation: 0, pending: 0, quitting: false,
-                        symmetry: symmetry, path: path)
+                        symmetry: symmetry, memoLimit: memoLimit, path: path)
   initLock pool.lock
   initCond pool.workCond
   initCond pool.doneCond
@@ -176,7 +224,7 @@ proc pexplore*(path: string; maxStates = 100_000; symmetry = false;
       pool.chunks[w].items.setLen 0
       pool.chunks[w].err.setLen 0
       for k in starts[w] ..< starts[w + 1]:
-        pool.chunks[w].states.add order[frontier[k]]
+        pool.chunks[w].states.add unpackState(interners, order[frontier[k]])
 
     runLevel(addr pool)
 
@@ -196,14 +244,16 @@ proc pexplore*(path: string; maxStates = 100_000; symmetry = false;
             pathIdxs.add idx
             idx = int(parent[idx])
           for i in countdown(pathIdxs.high, 0):
-            result.counterexample.add decodeState(m0, order[pathIdxs[i]])
+            result.counterexample.add decodeState(m0,
+              unpackState(interners, order[pathIdxs[i]]))
           return
         for enc in pool.chunks[w].items[j].succs:
-          if enc notin visited:
-            visited[enc] = int32(order.len)
+          let key = internState(interners, enc)
+          if key notin visited:
+            visited[key] = int32(order.len)
             parent.add fi
             nextFrontier.add int32(order.len)
-            order.add enc
+            order.add key
 
     if result.statesExplored - lastProgress >= 50_000:
       lastProgress = result.statesExplored

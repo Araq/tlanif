@@ -519,6 +519,34 @@ proc encodeValue*(v: Value; dest: var string) =
       dest.addU32 uint32(s)
       encodeValue(x, dest)
 
+proc skipEncodedValue*(src: string; pos: var int) =
+  ## Advance `pos` past one encoded value without materializing it.
+  let tag = src[pos]
+  inc pos
+  case tag
+  of '\0', '\1', '\2':
+    discard
+  of '\3':
+    inc pos, 8
+  of '\4':
+    inc pos, 4
+  of '\5', '\6':
+    let n = int(readU32(src, pos))
+    for i in 0 ..< n:
+      skipEncodedValue(src, pos)
+  of '\7':
+    let n = int(readU32(src, pos))
+    for i in 0 ..< n:
+      skipEncodedValue(src, pos)
+      skipEncodedValue(src, pos)
+  of '\x08':
+    let n = int(readU32(src, pos))
+    for i in 0 ..< n:
+      inc pos, 4
+      skipEncodedValue(src, pos)
+  else:
+    raiseAssert "corrupt value encoding, tag byte " & $ord(tag)
+
 proc decodeValue*(vs: Values; src: string; pos: var int): Value =
   let tag = src[pos]
   inc pos

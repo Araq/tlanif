@@ -32,6 +32,8 @@ type
     constSet*: HashSet[SymId]     ## symbols with a fixed (constant) value
     defInfo*: Table[SymId, DefInfo] ## lazily-computed free-var analysis
     memo*: Table[Value, Value]    ## (def, free-var values) → result value
+    memoLimit*: int               ## entry cap; the table is flushed when it
+                                  ## is reached (epoch eviction). 0 = unbounded.
     memoHits*: int
     memoMisses*: int
     initBody*: Cursor
@@ -177,6 +179,8 @@ proc evalSymRef(m: Module; s: SymId; f: Frame): Value =
         inc m.memoMisses
         var body = m.defs[s].body
         let v = evalExpr(m, body, f)
+        if m.memoLimit > 0 and m.memo.len >= m.memoLimit:
+          m.memo.clear()
         m.memo[key] = v
         return v
     var body = m.defs[s].body

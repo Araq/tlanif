@@ -106,6 +106,7 @@ proc loadModule*(buf: sink TokenBuf): Module =
     constSet: initHashSet[SymId](),
     defInfo: initTable[SymId, DefInfo](),
     memo: initTable[Value, Value](),
+    memoLimit: 1_000_000,
     memoHits: 0,
     memoMisses: 0,
     stutterVars: @[],

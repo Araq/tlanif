@@ -113,7 +113,7 @@ proc explore*(m: Module; maxStates = 100_000; symmetry = false): CheckResult =
 
   result.message = "ok — explored " & $result.statesExplored & " states"
 
-proc formatCounterexample*(m: Module; r: CheckResult): string =
+proc formatCounterexample*(r: CheckResult): string =
   if r.ok: return r.message
   result = r.message & "\ncounterexample (" & $r.counterexample.len & " states):\n"
   for i, st in r.counterexample:
