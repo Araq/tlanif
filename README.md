@@ -11,10 +11,13 @@ Run:
   bin/tlanif examples/mutex.nif
   bin/tlanif examples/mutex_bug.nif
 
-Modules:
-  tlanif_model — tags + load helpers
-  value        — finite values (bool/int/model/set/seq/fun/record)
-  eval         — expression + action interpreter
-  loader       — module wiring (constants/variables/models/defs/spec/check)
-  explore      — BFS explorer + counterexamples
-  tlanif       — CLI
+Quick overview over the codebase:
+
+| Module        | description        |
+|---------------|--------------------|
+|  tlanif_model | tags + load helpers |
+|  value        | finite values (bool/int/model/set/seq/fun/record) |
+|  eval         | expression + action interpreter |
+|  loader       | module wiring (constants/variables/models/defs/spec/check) |
+|  explore      | BFS explorer + counterexamples |
+|  tlanif       | CLI |
