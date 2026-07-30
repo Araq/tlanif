@@ -1,7 +1,7 @@
 ## Expression / action evaluator for TLA-on-NIF.
 
 import std / [tables, sets, strutils, algorithm]
-import tlanif, value
+import tlanif_model, value
 
 type
   EvalError* = object of CatchableError

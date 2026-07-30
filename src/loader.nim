@@ -1,7 +1,7 @@
 ## Load a TLA-NIF module: constants, variables, models, defs, spec, check.
 
 import std / [tables, sets]
-import tlanif, value, eval
+import tlanif_model, value, eval
 
 proc skipExtends(c: var Cursor) =
   expectTag(c, TExtends)
