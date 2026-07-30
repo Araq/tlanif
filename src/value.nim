@@ -386,7 +386,11 @@ proc setminus*(vs: Values; a, b: Value): Value =
     if e notin b: xs.add e
   sortedUniqueSet(vs, xs)
 
+var applyCount* {.threadvar.}: int
+
 proc applyFun*(f, arg: Value): Value =
+  when defined(countApply):
+    inc applyCount
   ## Function application `f[arg]`. In TLA+ a sequence is a function with
   ## domain `1..Len(f)`, so `apply` on a `vkSeq` is 1-based indexing.
   if kind(f) == vkSeq:

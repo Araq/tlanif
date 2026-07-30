@@ -1,7 +1,7 @@
 ## TLA-on-NIF model checker — CLI entry point.
 
 import std / [os, strutils, syncio, tables, cpuinfo]
-import tlanif_model, loader, explore, pexplore, eval
+import tlanif_model, loader, explore, pexplore, eval, value
 
 const Help = """
 tlanif — NIF-syntax TLA safety model checker
@@ -63,6 +63,8 @@ proc main() =
         stderr.writeLine "memo: " & $m.memoHits & " hits / " & $total &
           " (" & $(m.memoHits * 100 div total) & "% hit, " &
           $m.memo.len & " entries)"
+    when defined(countApply):
+      stderr.writeLine "applyCount(main): " & $value.applyCount
     if r.ok:
       echo r.message
       quit(0)

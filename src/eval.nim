@@ -137,7 +137,7 @@ proc collectFree(m: Module; c: var Cursor; bound: HashSet[SymId];
   else:
     c.skip
 
-proc getDefInfo(m: Module; s: SymId): DefInfo =
+proc getDefInfo*(m: Module; s: SymId): DefInfo =
   if s in m.defInfo: return m.defInfo[s]
   var acc = initHashSet[SymId]()
   var visiting = initHashSet[SymId]()
@@ -594,7 +594,7 @@ proc evalExpr*(m: Module; c: var Cursor; f: Frame): Value =
 
 # ── Actions ──────────────────────────────────────────────────────────────
 
-proc containsPrime(m: Module; c: Cursor): bool =
+proc containsPrime*(m: Module; c: Cursor): bool =
   ## Does the subtree at `c` (following def references) contain a
   ## `prime`/`unchanged`? Such a subtree is an *action*; a prime-free one is a
   ## pure state predicate and must be evaluated with boolean short-circuiting.

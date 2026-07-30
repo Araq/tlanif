@@ -16,7 +16,7 @@
 ## shortest-path and `parent` reconstruction is unchanged.
 
 import std / [tables, sets, locks, syncio, strutils]
-import nifcore, value, eval, loader, explore
+import nifcore, value, eval, loader, explore, compile
 
 type
   Item = object
@@ -92,25 +92,41 @@ proc unpackState(ins: seq[Interner]; key: string): string =
              (uint32(key[p+2]) shl 16) or (uint32(key[p+3]) shl 24)
     result.add ins[i].encs[int id]
 
-proc expandChunk(m: Module; perms: seq[Table[SymId, SymId]]; useSym: bool;
-                 chunk: ptr Chunk) =
-  ## `seen` dedups successors within the chunk before they cross the
-  ## barrier: sibling states share most successors (on wide models ~90% of
-  ## generated states are duplicates), and shipping each copy would hold
-  ## a level's worth of redundant encodings in memory at the barrier.
-  ## Dropping a duplicate only reparents it to another same-level state,
-  ## so BFS path lengths are unaffected.
+proc expandChunk(cm: CompiledModule; perms: seq[Table[SymId, SymId]];
+                 useSym: bool; chunk: ptr Chunk) =
+  ## Runs the compiled invariant + Next (see compile.nim). `seen` dedups
+  ## successors within the chunk before they cross the barrier: sibling
+  ## states share most successors (on wide models ~90% of generated states
+  ## are duplicates), and shipping each copy would hold a level's worth of
+  ## redundant encodings in memory at the barrier. Dropping a duplicate
+  ## only reparents it to another same-level state, so BFS path lengths
+  ## are unaffected.
+  let m = cm.m
   var seen = initHashSet[string]()
   chunk.items.setLen chunk.states.len
   for j in 0 ..< chunk.states.len:
-    let st = decodeState(m, chunk.states[j])
-    var it = Item(invOk: checkInvariant(m, st, m.checkBody), succs: @[])
+    loadState(cm, chunk.states[j])
+    when defined(countApply):
+      let a0 = value.applyCount
+    var it = Item(invOk: (when defined(skipInv): true else: checkInv(cm)), succs: @[])
+    when defined(countApply):
+      stderr.writeLine "  inv applies: " & $(value.applyCount - a0)
+      let a1 = value.applyCount
     if it.invOk:
-      for nxt in successors(m, st):
-        let cn = if useSym: canonicalState(m, nxt, perms) else: nxt
-        let enc = encodeState(m, cn)
-        if not seen.containsOrIncl(enc):
-          it.succs.add enc
+      var buf = ""
+      runNext(cm, proc () =
+        if useSym:
+          let cn = canonicalState(m, successorState(cm), perms)
+          let enc = encodeState(m, cn)
+          if not seen.containsOrIncl(enc):
+            it.succs.add enc
+        else:
+          encodeSuccessor(cm, buf)
+          if buf notin seen:
+            seen.incl buf
+            it.succs.add buf)
+    when defined(countApply):
+      stderr.writeLine "  next applies: " & $(value.applyCount - a1)
     chunk.items[j] = it
 
 proc workerLoop(arg: WorkerArg) {.thread.} =
@@ -119,7 +135,7 @@ proc workerLoop(arg: WorkerArg) {.thread.} =
   ## nifcore's `fallbackPool`/`fallbackTags`, which tlanif never sets (all
   ## buffers carry per-module pools), so they are read-only nil here.
   let p = arg.pool
-  var m: Module = nil
+  var cm: CompiledModule = nil
   var perms: seq[Table[SymId, SymId]] = @[]
   var useSym = false
   var myGen = 0
@@ -133,19 +149,20 @@ proc workerLoop(arg: WorkerArg) {.thread.} =
     myGen = p.generation
     release p.lock
     {.cast(gcsafe).}:
-      if m == nil and p.chunks[arg.idx].err.len == 0:
+      if cm == nil and p.chunks[arg.idx].err.len == 0:
         try:
-          m = loadModuleFile(p.path)
+          let m = loadModuleFile(p.path)
           if p.memoLimit >= 0:
             m.memoLimit = p.memoLimit
           if p.symmetry:
             perms = buildPerms(m.modelGroups)
           useSym = p.symmetry and perms.len > 1
+          cm = compileModule(m)
         except CatchableError as e:
-          p.chunks[arg.idx].err = "worker load failed: " & e.msg
-      if m != nil:
+          p.chunks[arg.idx].err = "worker load/compile failed: " & e.msg
+      if cm != nil:
         try:
-          expandChunk(m, perms, useSym, addr p.chunks[arg.idx])
+          expandChunk(cm, perms, useSym, addr p.chunks[arg.idx])
         except CatchableError as e:
           p.chunks[arg.idx].err = e.msg
     acquire p.lock
@@ -153,6 +170,9 @@ proc workerLoop(arg: WorkerArg) {.thread.} =
     if p.pending == 0:
       signal p.doneCond
     release p.lock
+    when defined(countApply):
+      stderr.writeLine "applyCount: " & $value.applyCount &
+        " invCalls: " & $compile.invCalls
 
 proc runLevel(p: ptr WorkerPool) =
   acquire p.lock
