@@ -15,7 +15,7 @@
 ## synchrony preserves BFS order, so counterexamples are still
 ## shortest-path and `parent` reconstruction is unchanged.
 
-import std / [tables, locks, syncio, strutils]
+import std / [tables, sets, locks, syncio, strutils]
 import nifcore, value, eval, loader, explore
 
 type
@@ -94,6 +94,13 @@ proc unpackState(ins: seq[Interner]; key: string): string =
 
 proc expandChunk(m: Module; perms: seq[Table[SymId, SymId]]; useSym: bool;
                  chunk: ptr Chunk) =
+  ## `seen` dedups successors within the chunk before they cross the
+  ## barrier: sibling states share most successors (on wide models ~90% of
+  ## generated states are duplicates), and shipping each copy would hold
+  ## a level's worth of redundant encodings in memory at the barrier.
+  ## Dropping a duplicate only reparents it to another same-level state,
+  ## so BFS path lengths are unaffected.
+  var seen = initHashSet[string]()
   chunk.items.setLen chunk.states.len
   for j in 0 ..< chunk.states.len:
     let st = decodeState(m, chunk.states[j])
@@ -101,7 +108,9 @@ proc expandChunk(m: Module; perms: seq[Table[SymId, SymId]]; useSym: bool;
     if it.invOk:
       for nxt in successors(m, st):
         let cn = if useSym: canonicalState(m, nxt, perms) else: nxt
-        it.succs.add encodeState(m, cn)
+        let enc = encodeState(m, cn)
+        if not seen.containsOrIncl(enc):
+          it.succs.add enc
     chunk.items[j] = it
 
 proc workerLoop(arg: WorkerArg) {.thread.} =
@@ -213,54 +222,66 @@ proc pexplore*(path: string; maxStates = 100_000; symmetry = false;
     result.message = msg
     return
 
+  # Each BFS level is streamed through the workers in bounded windows:
+  # dispatch a slice of the frontier, merge its results, repeat. Levels on
+  # wide models reach millions of states; materializing a whole level's
+  # frontier encodings plus its generated successors at one barrier is
+  # what limits memory, not the visited set. Windowing bounds the
+  # in-flight data to O(batch * outdegree) and caps the max-states
+  # overshoot at one window.
+  let batch = jobs * 8192
   var lastProgress = 0
   while frontier.len > 0:
-    let n = frontier.len
-    var starts = newSeq[int](jobs + 1)
-    for w in 0 .. jobs:
-      starts[w] = w * n div jobs
-    for w in 0 ..< jobs:
-      pool.chunks[w].states.setLen 0
-      pool.chunks[w].items.setLen 0
-      pool.chunks[w].err.setLen 0
-      for k in starts[w] ..< starts[w + 1]:
-        pool.chunks[w].states.add unpackState(interners, order[frontier[k]])
-
-    runLevel(addr pool)
-
     var nextFrontier: seq[int32] = @[]
-    for w in 0 ..< jobs:
-      if pool.chunks[w].err.len > 0:
-        fail pool.chunks[w].err
-      for j in 0 ..< pool.chunks[w].items.len:
-        let fi = frontier[starts[w] + j]
-        inc result.statesExplored
-        if not pool.chunks[w].items[j].invOk:
-          result.ok = false
-          result.message = "invariant violated"
-          var pathIdxs: seq[int] = @[]
-          var idx = int(fi)
-          while idx >= 0:
-            pathIdxs.add idx
-            idx = int(parent[idx])
-          for i in countdown(pathIdxs.high, 0):
-            result.counterexample.add decodeState(m0,
-              unpackState(interners, order[pathIdxs[i]]))
-          return
-        for enc in pool.chunks[w].items[j].succs:
-          let key = internState(interners, enc)
-          if key notin visited:
-            visited[key] = int32(order.len)
-            parent.add fi
-            nextFrontier.add int32(order.len)
-            order.add key
+    var fpos = 0
+    while fpos < frontier.len:
+      let n = min(batch, frontier.len - fpos)
+      var starts = newSeq[int](jobs + 1)
+      for w in 0 .. jobs:
+        starts[w] = fpos + w * n div jobs
+      for w in 0 ..< jobs:
+        pool.chunks[w].states.setLen 0
+        pool.chunks[w].items.setLen 0
+        pool.chunks[w].err.setLen 0
+        for k in starts[w] ..< starts[w + 1]:
+          pool.chunks[w].states.add unpackState(interners, order[frontier[k]])
 
-    if result.statesExplored - lastProgress >= 50_000:
-      lastProgress = result.statesExplored
-      stderr.writeLine "  ... " & $result.statesExplored & " explored, " &
-        $order.len & " seen, |frontier|=" & $nextFrontier.len
-    if result.statesExplored > maxStates:
-      fail "state limit exceeded (" & $maxStates & ")"
+      runLevel(addr pool)
+
+      for w in 0 ..< jobs:
+        if pool.chunks[w].err.len > 0:
+          fail pool.chunks[w].err
+        for j in 0 ..< pool.chunks[w].items.len:
+          let fi = frontier[starts[w] + j]
+          inc result.statesExplored
+          if not pool.chunks[w].items[j].invOk:
+            result.ok = false
+            result.message = "invariant violated"
+            var pathIdxs: seq[int] = @[]
+            var idx = int(fi)
+            while idx >= 0:
+              pathIdxs.add idx
+              idx = int(parent[idx])
+            for i in countdown(pathIdxs.high, 0):
+              result.counterexample.add decodeState(m0,
+                unpackState(interners, order[pathIdxs[i]]))
+            return
+          for enc in pool.chunks[w].items[j].succs:
+            let key = internState(interners, enc)
+            if key notin visited:
+              visited[key] = int32(order.len)
+              parent.add fi
+              nextFrontier.add int32(order.len)
+              order.add key
+
+      if result.statesExplored - lastProgress >= 50_000:
+        lastProgress = result.statesExplored
+        stderr.writeLine "  ... " & $result.statesExplored & " explored, " &
+          $order.len & " seen, |frontier|=" & $(frontier.len - fpos - n) &
+          "+" & $nextFrontier.len
+      if result.statesExplored > maxStates:
+        fail "state limit exceeded (" & $maxStates & ")"
+      fpos += n
     frontier = move nextFrontier
 
   result.message = "ok — explored " & $result.statesExplored & " states"
