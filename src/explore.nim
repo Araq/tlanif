@@ -52,7 +52,11 @@ proc explore*(m: Module; maxStates = 100_000; symmetry = false): CheckResult =
   var parent: seq[int] = @[]
   var order: seq[State] = @[]
 
-  let perms = buildPerms(m.modelGroups)
+  # Only materialize the permutation product when symmetry reduction is
+  # requested: it is the product of per-sort factorials and explodes on
+  # larger model sorts (6+6 objects → over a million permutation tables).
+  let perms = if symmetry: buildPerms(m.modelGroups)
+              else: @[]
   let useSym = symmetry and perms.len > 1
   if useSym:
     stderr.writeLine "symmetry reduction: " & $perms.len & " permutations"

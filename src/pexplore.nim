@@ -86,7 +86,8 @@ proc workerLoop(arg: WorkerArg) {.thread.} =
       if m == nil and p.chunks[arg.idx].err.len == 0:
         try:
           m = loadModuleFile(p.path)
-          perms = buildPerms(m.modelGroups)
+          if p.symmetry:
+            perms = buildPerms(m.modelGroups)
           useSym = p.symmetry and perms.len > 1
         except CatchableError as e:
           p.chunks[arg.idx].err = "worker load failed: " & e.msg
@@ -115,7 +116,8 @@ proc pexplore*(path: string; maxStates = 100_000; symmetry = false;
   result = CheckResult(ok: true, statesExplored: 0, counterexample: @[],
                        message: "")
   let m0 = loadModuleFile(path)
-  let perms0 = buildPerms(m0.modelGroups)
+  let perms0 = if symmetry: buildPerms(m0.modelGroups)
+               else: @[]
   let useSym = symmetry and perms0.len > 1
   if useSym:
     stderr.writeLine "symmetry reduction: " & $perms0.len & " permutations"
