@@ -1,0 +1,100 @@
+(stmts#Model of Nim's --mm:atomicArc `nimDecRefIsLast` with the uniquely-referenced
+   fast path (lib/system/arc.nim):
+
+     if (atomicLoad(rc) and not rcMask) == 0:
+       free()
+     elif atomicDec(rc) == -rcIncrement:
+       free()
+
+   `rc` is Nim's BIASED count: 0 means "exactly one reference". The load and
+   the branch/RMW are separate steps, so another thread may act in between --
+   that window is the whole point of the model.
+
+   Each thread holds `pending` references and drops them one at a time. A
+   thread that still holds a reference may Dup it (incRef), which is the only
+   legal way for a new counted reference to appear: derived from an existing
+   counted reference, never out of thin air. That is clause (b) of the
+   soundness argument; clause (a), deriving from the owning location, is
+   excluded because destroying a location happens-after every access to it.
+
+   pc: 0 = about to load, 1 = loaded and rd holds the possibly stale value.#
+
+  (constants :Threads.0. :MaxRc.0.)
+  (models Threads.0. :t1.0. :t2.0.)
+  (assign MaxRc.0. 2)
+
+  (variables :pc.0. :rd.0. :pending.0. :rc.0. :frees.0.)
+
+  (def :Init.0.
+    (and
+      (prime pc.0. (funof :t.0 Threads.0. 0))
+      (prime rd.0. (funof :t.0 Threads.0. 0))
+      (prime pending.0. (funof :t.0 Threads.0. 1))
+      (prime rc.0. 1)
+      (prime frees.0. 0)))
+
+  (def :Dup.0.
+    (exists :t.0 Threads.0.
+      (and
+        (eq (apply pc.0. t.0) 0)
+        (ge (apply pending.0. t.0) 1)
+        (lt rc.0. MaxRc.0.)
+        (prime pending.0.
+          (except pending.0.
+            (mapsto t.0 (plus (apply pending.0. t.0) 1))))
+        (prime rc.0. (plus rc.0. 1))
+        (unchanged pc.0. rd.0. frees.0.))))
+
+  (def :Load.0.
+    (exists :t.0 Threads.0.
+      (and
+        (eq (apply pc.0. t.0) 0)
+        (ge (apply pending.0. t.0) 1)
+        (prime pc.0. (except pc.0. (mapsto t.0 1)))
+        (prime rd.0. (except rd.0. (mapsto t.0 rc.0.)))
+        (unchanged pending.0. rc.0. frees.0.))))
+
+  (def :Decide.0.
+    (exists :t.0 Threads.0.
+      (and
+        (eq (apply pc.0. t.0) 1)
+        (prime pc.0. (except pc.0. (mapsto t.0 0)))
+        (prime rd.0. (except rd.0. (mapsto t.0 0)))
+        (prime pending.0.
+          (except pending.0.
+            (mapsto t.0 (minus (apply pending.0. t.0) 1))))
+        (if (eq (apply rd.0. t.0) 0)
+          (and
+            (prime rc.0. rc.0.)
+            (prime frees.0. (plus frees.0. 1)))
+          (and
+            (prime rc.0. (minus rc.0. 1))
+            (if (eq (minus rc.0. 1) (minus 0 1))
+              (prime frees.0. (plus frees.0. 1))
+              (prime frees.0. frees.0.)))))))
+
+  (def :Next.0.
+    (or Dup.0. Load.0. Decide.0.))
+
+  (def :Quiet.0.
+    (forall :t.0 Threads.0.
+      (and
+        (eq (apply pending.0. t.0) 0)
+        (eq (apply pc.0. t.0) 0))))
+
+  (def :NoDoubleFree.0.
+    (le frees.0. 1))
+
+  (def :NoLeak.0.
+    (implies Quiet.0. (eq frees.0. 1)))
+
+  (def :NoUseAfterFree.0.
+    (implies (ge frees.0. 1) Quiet.0.))
+
+  (def :Inv.0.
+    (and NoDoubleFree.0. NoLeak.0. NoUseAfterFree.0.))
+
+  (spec (always-stutter Init.0. Next.0.
+    (tuple pc.0. rd.0. pending.0. rc.0. frees.0.)))
+  (check Inv.0.)
+)
