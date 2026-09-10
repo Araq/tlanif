@@ -629,6 +629,14 @@ proc compilePrimeInto(cm: CompiledModule; varSym: SymId; e: CExpr;
       k()
       ctx.primedSet[idx] = false
 
+proc slotReader(ctx: Ctx; slot: int): CExpr =
+  ## A fresh closure per call. `unchanged` builds one reader per variable in a
+  ## loop; a `proc` literal written inside that loop captured the loop-body
+  ## `slot` by its single shared environment cell, so EVERY reader read the
+  ## slot of the last iteration: `(unchanged phase logIdx)` copied `phase`
+  ## into `logIdx`. Found by the arkham_bindings port (nativenif/proofs).
+  result = proc(): Value = ctx.slots[slot]
+
 proc compileAction(cm: CompiledModule; c: var Cursor; sc: Scope;
                    k: Cont): Cont =
   let ctx = cm.ctx
@@ -726,7 +734,7 @@ proc compileAction(cm: CompiledModule; c: var Cursor; sc: Scope;
         if s notin sc.slotOf or sc.slotOf[s] >= cm.nvars:
           raiseEval("unchanged of non-variable: " & cm.m.pool.poolSym(s))
         let slot = sc.slotOf[s]
-        cont = compilePrimeInto(cm, s, proc(): Value = ctx.slots[slot], cont)
+        cont = compilePrimeInto(cm, s, slotReader(ctx, slot), cont)
       result = cont
     of TEq:
       c.into:
