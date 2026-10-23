@@ -1,0 +1,65 @@
+name: tlanif ci
+on:
+  push:
+    branches:
+    - 'master'
+  pull_request:
+
+# One in-flight run per branch/PR; `master` keeps every commit's run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/master' && github.sha || '' }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: 'linux-amd64-nim-devel'
+    runs-on: ubuntu-24.04
+    steps:
+      # `src/nim.cfg` and `tests/config.nims` find nimony's NIF libraries via
+      # `../../nimony/src/lib`, so both repos are checked out side by side.
+      - uses: actions/checkout@v7
+        with:
+          path: tlanif
+
+      - uses: actions/checkout@v7
+        with:
+          repository: nim-lang/nimony
+          path: nimony
+          sparse-checkout: src/lib
+
+      - name: Setup Nim
+        uses: alaviss/setup-nim@0.1.1
+        with:
+          path: 'nim'
+          version: devel
+          architecture: amd64
+
+      - name: Build tlanif
+        working-directory: tlanif
+        run: nim c -d:release -o:bin/tlanif src/tlanif.nim
+
+      - name: Check examples
+        working-directory: tlanif
+        run: |
+          # file:expected exit code (0 = pass, 2 = invariant violation)
+          status=0
+          for entry in \
+            mutex.nif:0 mutex_bug.nif:2 \
+            atomicarc.nif:0 atomicarc_bug.nif:2 atomicarc_cursor.nif:2
+          do
+            file=${entry%%:*}
+            want=${entry##*:}
+            set +e
+            bin/tlanif "examples/$file"
+            got=$?
+            set -e
+            if [ "$got" != "$want" ]; then
+              echo "::error::examples/$file exited with $got, expected $want"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Run tests
+        working-directory: tlanif
+        run: nim c -r -d:release tests/tliveness.nim
